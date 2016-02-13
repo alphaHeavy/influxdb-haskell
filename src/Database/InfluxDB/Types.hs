@@ -3,6 +3,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
@@ -61,7 +62,7 @@ import Data.Word (Word32)
 import GHC.Generics (Generic)
 import qualified Data.Sequence as Seq
 
-import Control.Retry (RetryPolicy(..), limitRetries, exponentialBackoff)
+import Control.Retry (RetryPolicyM(..), limitRetries, exponentialBackoff)
 import Data.Aeson ((.=), (.:))
 import Data.Aeson.TH
 import Data.Aeson.Types (Parser)
@@ -215,11 +216,11 @@ data ServerPool = ServerPool
   -- ^ Current active server
   , serverBackup :: !(Seq Server)
   -- ^ The rest of the servers in the pool.
-  , serverRetryPolicy :: !RetryPolicy
-  } deriving (Typeable, Generic)
+  , serverRetryPolicy :: (RetryPolicyM IO)
+  } deriving (Typeable)
 
 {-# DEPRECATED serverRetrySettings "Use serverRetryPolicy instead" #-}
-serverRetrySettings :: ServerPool -> RetryPolicy
+serverRetrySettings :: ServerPool -> RetryPolicyM IO
 serverRetrySettings = serverRetryPolicy
 
 newtype Database = Database
@@ -292,7 +293,7 @@ newServerPool = newServerPoolWithRetrySettings defaultRetryPolicy
     defaultRetryPolicy = limitRetries 5 <> exponentialBackoff 50
 
 newServerPoolWithRetryPolicy
-  :: RetryPolicy -> Server -> [Server] -> IO (IORef ServerPool)
+  :: RetryPolicyM IO -> Server -> [Server] -> IO (IORef ServerPool)
 newServerPoolWithRetryPolicy retryPolicy active backups =
   newIORef ServerPool
     { serverActive = active
@@ -303,7 +304,7 @@ newServerPoolWithRetryPolicy retryPolicy active backups =
 {-# DEPRECATED newServerPoolWithRetrySettings
   "Use newServerPoolWithRetryPolicy instead" #-}
 newServerPoolWithRetrySettings
-  :: RetryPolicy -> Server -> [Server] -> IO (IORef ServerPool)
+  :: RetryPolicyM IO -> Server -> [Server] -> IO (IORef ServerPool)
 newServerPoolWithRetrySettings = newServerPoolWithRetryPolicy
 
 -- | Get a server from the pool.

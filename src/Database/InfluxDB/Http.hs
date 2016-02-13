@@ -16,12 +16,8 @@ module Database.InfluxDB.Http
   , formatLine
   , formatLines
   -- ** Updating Points
-  , post, postWithPrecision
-  , SeriesT, PointT, Line(..)
-  , writeSeries
-  , writeSeriesData
-  , withSeries
-  , writePoints
+  , post
+  , postWithPrecision
 
   -- ** Deleting Points
   , deleteSeries
@@ -54,20 +50,13 @@ module Database.InfluxDB.Http
 import Control.Applicative
 import Control.DeepSeq
 import Control.Monad.Identity
-import Control.Monad.Writer
-import Data.DList (DList)
 import Data.IORef
 import Data.Maybe (fromJust)
-import Data.Proxy
 import Data.Text (Text)
-import Data.Vector (Vector)
-import Data.Word (Word32)
 import Network.URI (escapeURIString, isAllowedInURI)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.DList as DL
-import Data.Int
 import qualified Data.List as L
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -78,21 +67,13 @@ import Prelude
 
 import Control.Monad.Catch (Handler(..))
 import Control.Retry
-import Data.Aeson ((.=))
-import Data.Aeson.TH (deriveToJSON)
 import Data.Default.Class (Default(def))
 import qualified Data.Aeson as A
-import qualified Data.Aeson.Encode as AE
-import qualified Data.Aeson.Parser as AP
-import qualified Data.Aeson.Types as AT
 import qualified Data.Attoparsec.ByteString as P
-import qualified Data.Attoparsec.ByteString.Lazy as PL
 import qualified Network.HTTP.Client as HC
 
 import Database.InfluxDB.Decode
-import Database.InfluxDB.Encode
 import Database.InfluxDB.Types
-import Database.InfluxDB.Types.Internal (stripPrefixOptions)
 import Database.InfluxDB.Stream (Stream(..))
 import qualified Database.InfluxDB.Stream as S
 
@@ -184,8 +165,8 @@ postWithPrecision
   -> TimePrecision
   -> [Line]
   -> IO ()
-postWithPrecision config databaseName prec =
-  postGeneric config databaseName (Just prec)
+postWithPrecision config databaseName precision =
+  postGeneric config databaseName (Just precision)
 
 postGeneric
   :: Config
@@ -193,7 +174,7 @@ postGeneric
   -> Maybe TimePrecision
   -> [Line]
   -> IO ()
-postGeneric Config {..} databaseName prec write = do
+postGeneric Config {..} databaseName precision write = do
   void $ httpLbsWithRetry configServerPool
     (makeRequest write)
     configHttpManager
@@ -206,87 +187,18 @@ postGeneric Config {..} databaseName prec write = do
       , HC.queryString = printFunc
       }
     Credentials {..} = configCreds
-    formatString = maybe "u=%s&p=%s&db=%s" (\ _ ->  "u=%s&p=%s&db=%s&precision=%s") prec
+    formatString = maybe "u=%s&p=%s&db=%s" (\ _ ->  "u=%s&p=%s&db=%s&precision=%s") precision
     printFunc =
-      case prec of
+      case precision of
         Just _ -> escapeString $ printf formatString
           (T.unpack credsUser)
           (T.unpack credsPassword)
           (T.unpack databaseName)
-          (timePrecString $ fromJust prec)
+          (timePrecString $ fromJust precision)
         Nothing -> escapeString $ printf formatString
           (T.unpack credsUser)
           (T.unpack credsPassword)
           (T.unpack databaseName)
-
--- | Monad transformer to batch up multiple writes of series to speed up
--- insertions.
-newtype SeriesT m a = SeriesT (WriterT (DList Series) m a)
-  deriving
-    ( Functor, Applicative, Monad, MonadIO, MonadTrans
-    , MonadWriter (DList Series)
-    )
-
--- | Monad transformer to batch up multiple writes of points to speed up
--- insertions.
-newtype PointT p m a = PointT (WriterT (DList (Vector Value)) m a)
-  deriving
-    ( Functor, Applicative, Monad, MonadIO, MonadTrans
-    , MonadWriter (DList (Vector Value))
-    )
-
-runSeriesT :: Monad m => SeriesT m a -> m (a, [Series])
-runSeriesT (SeriesT w) = do
-  (a, series) <- runWriterT w
-  return (a, DL.toList series)
-
--- | Write a single series data.
-writeSeries
-  :: (Monad m, ToSeriesData a)
-  => Text
-  -- ^ Series name
-  -> a
-  -- ^ Series data
-  -> SeriesT m ()
-writeSeries name = writeSeriesData name . toSeriesData
-
--- | Write a single series data.
-writeSeriesData
-  :: Monad m
-  => Text
-  -- ^ Series name
-  -> SeriesData
-  -- ^ Series data
-  -> SeriesT m ()
-writeSeriesData name a = tell . DL.singleton $ Series
-  { seriesName = name
-  , seriesData = a
-  }
-
--- | Write a bunch of data for a single series. Columns for the points don't
--- need to be specified because they can be inferred from the type of @a@.
-withSeries
-  :: forall m a. (Monad m, ToSeriesData a)
-  => Text
-  -- ^ Series name
-  -> PointT a m ()
-  -> SeriesT m ()
-withSeries name (PointT w) = do
-  (_, values) <- lift $ runWriterT w
-  tell $ DL.singleton Series
-    { seriesName = name
-    , seriesData = SeriesData
-        { seriesDataColumns = toSeriesColumns (Proxy :: Proxy a)
-        , seriesDataPoints = DL.toList values
-        }
-    }
-
--- | Write a data into a series.
-writePoints
-  :: (Monad m, ToSeriesData a)
-  => a
-  -> PointT a m ()
-writePoints = tell . DL.singleton . toSeriesPoints
 
 deleteSeries
   :: Config
@@ -441,7 +353,7 @@ dropDatabase config databaseName = runRequest_ config request
 listUsers
   :: Config
   -> IO [User]
-listUsers config@Config {..} = do
+listUsers _config@Config {..} = do
   response <- httpLbsWithRetry configServerPool request configHttpManager
   let parsed :: Maybe Results = A.decode $ HC.responseBody response
   case parsed of
@@ -578,8 +490,8 @@ withPool
   -> (HC.Request -> IO a)
   -> IO a
 withPool pool request f = do
-  retryPolicy <- serverRetryPolicy <$> readIORef pool
-  recovering retryPolicy handlers $ do
+  policy <- serverRetryPolicy <$> readIORef pool
+  recovering policy handlers $ \ _ -> do
     server <- activeServer pool
     f $ makeRequest server
   where
