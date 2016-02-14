@@ -37,6 +37,7 @@ module Database.InfluxDB
   -- ** Writing Data
   , formatLine
   -- *** Updating Points
+  , Line(..)
   , post
   , postWithPrecision
 

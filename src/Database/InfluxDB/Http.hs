@@ -16,6 +16,7 @@ module Database.InfluxDB.Http
   , formatLine
   , formatLines
   -- ** Updating Points
+  , Line(..)
   , post
   , postWithPrecision
 
